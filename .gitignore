@@ -1,3 +1,4 @@
 node_modules
 dist
-
+astock/data/
+__pycache__/
