@@ -63,6 +63,13 @@ class Params:
 
 REBOUND = Params()
 
+# Same signal without the washout gate: more trades of lower average quality.
+# Out of sample (2024-07..2026-11) it earned more (CAGR 13.8% vs 10.5%) with a deeper
+# drawdown (-10.0% vs -7.5%); in sample the gated version was clearly better.
+AGGRESSIVE = Params(name="rebound-aggressive", min_washout=0.0)
+
+PROFILES = {"steady": REBOUND, "aggressive": AGGRESSIVE}
+
 CLASSIC = Params(
     name="classic", dist_ma60_max=9.9, pct_min=3.0, pct_max=5.0, vol_ratio_min=1.3,
     close_pos_min=0.75, turnover_min=3.0, turnover_max=12.0, mcap_min=40e8, amount_min=2e8,

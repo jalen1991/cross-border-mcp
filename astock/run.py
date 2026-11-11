@@ -16,7 +16,7 @@ import pandas as pd
 
 from . import backtest as bt
 from . import data
-from .strategy import CLASSIC, REBOUND, Params, features, score, signal_mask
+from .strategy import CLASSIC, PROFILES, Params, features, score, signal_mask
 
 IS_START, IS_END = "2021-07-01", "2024-06-30"
 OOS_START = "2024-07-01"
@@ -124,9 +124,18 @@ def cmd_walkforward(prm: Params) -> None:
     print(f"上证指数 same period: total={b['total_return']:+.1%}  MDD={b['max_drawdown']:.1%}")
 
 
-def live_signals(snap: pd.DataFrame, today: str, prm: Params) -> pd.DataFrame:
+def session_fraction(now: pd.Timestamp) -> float:
+    """Share of the 240 trading minutes elapsed. Near the close it tracks the share of
+    daily volume already traded (5-minute bars: ~0.957 at 14:50 vs 230/240 = 0.958)."""
+    m = now.hour * 60 + now.minute
+    elapsed = min(max(m - 570, 0), 120) + min(max(m - 780, 0), 120)
+    return min(max(elapsed / 240, 0.05), 1.0)
+
+
+def live_signals(snap: pd.DataFrame, today: str, prm: Params, volume_scale: float = 1.0) -> pd.DataFrame:
     """Evaluate the entry rule on today's quotes appended to the cached history
-    (which must end at the previous session)."""
+    (which must end at the previous session). Intraday volume is scaled up to a
+    full-day estimate, otherwise the volume-ratio test fails for names that pass at the close."""
     snap = snap[~snap["name"].str.upper().str.contains("ST|退", na=False) & (snap["price"] > 0)]
     pre = snap[snap["pct"].between(prm.pct_min, prm.pct_max) & (snap["amount"] >= prm.amount_min)]
     rows = []
@@ -139,8 +148,8 @@ def live_signals(snap: pd.DataFrame, today: str, prm: Params) -> pd.DataFrame:
         if len(hist) < prm.min_listed_days:
             continue
         bar = {"date": today, "open": r.open, "close": r.price, "high": r.high, "low": r.low,
-               "volume": r.volume, "amount": r.amount, "amplitude": 0.0, "pct": r.pct,
-               "chg": 0.0, "turnover": r.turnover}
+               "volume": r.volume * volume_scale, "amount": r.amount * volume_scale, "amplitude": 0.0,
+               "pct": r.pct, "chg": 0.0, "turnover": r.turnover * volume_scale}
         f = features(pd.concat([hist, pd.DataFrame([bar])], ignore_index=True), r.code).iloc[[-1]].copy()
         f["is_st"], f["mkt_ok"], f["name"] = False, True, r.name
         if signal_mask(f, prm).iloc[0]:
@@ -159,7 +168,9 @@ POS_COLS = ["code", "name", "buy_date", "buy_price", "shares", "status", "sell_d
 def load_positions() -> pd.DataFrame:
     if not os.path.exists(POSITIONS_PATH):
         return pd.DataFrame(columns=POS_COLS)
-    return pd.read_csv(POSITIONS_PATH, dtype={"code": str})
+    return pd.read_csv(POSITIONS_PATH, dtype={"code": str, "name": str, "buy_date": str,
+                                              "status": str, "sell_date": str}, keep_default_na=False,
+                       na_values={"buy_price": [""], "sell_price": [""], "shares": [""]})
 
 
 def previous_washout(today: str) -> tuple[str | None, float]:
@@ -212,9 +223,10 @@ def cmd_screen(prm: Params, record: bool = False, capital: float | None = None) 
 
     wdate, washout = previous_washout(today)
     snap = data.snapshot(min_pct=prm.pct_min)
-    out = live_signals(snap, today, prm)
+    frac = session_fraction(now)
+    out = live_signals(snap, today, prm, volume_scale=1 / frac)
     breadth = len(out)
-    print(f"\n{now:%Y-%m-%d %H:%M} 北京时间")
+    print(f"\n{now:%Y-%m-%d %H:%M} 北京时间（已交易 {frac:.0%}，成交量按全天折算）")
     print(f"恐慌广度（{wdate} 收盘，跌破 MA60 两成的股票占比）= {washout:.1%}  门槛 >= {prm.min_washout:.0%}")
     print(f"今日超跌放量反弹信号 = {breadth} 只  门槛 >= {prm.min_breadth}；空余仓位 {free}/{prm.max_positions}")
     if wdate is None or (pd.Timestamp(today) - pd.Timestamp(wdate)).days > 4:
@@ -236,6 +248,9 @@ def cmd_screen(prm: Params, record: bool = False, capital: float | None = None) 
         buys["shares"] = ((slot / buys["close"]) // 100 * 100).astype(int) if slot else 0
         print(f"\n结论：触发。尾盘买入以下 {len(buys)} 只，每只 1/{prm.max_positions} 仓位：")
         print(buys[["code", "name", "close", "shares"]].to_string(index=False))
+        if slot and (buys["shares"] == 0).any():
+            print(f"注意：shares=0 的股票一手（100 股）超过单仓 {slot:,.0f} 元，买不起就跳过，"
+                  f"不要挪用其他仓位的钱加大单票风险。")
         print(f"卖出规则：持有 {prm.hold_days} 个交易日后尾盘卖出；期间收盘亏损超过 {-prm.stop_loss:.0%} 当天尾盘止损。")
 
     if record:
@@ -258,8 +273,10 @@ def main() -> None:
     ap.add_argument("cmd", choices=["download", "backtest", "tune", "walkforward", "screen"])
     ap.add_argument("--record", action="store_true", help="screen: write today's buys/sells to the journal")
     ap.add_argument("--capital", type=float, help="screen: account size in CNY, to size orders in lots")
+    ap.add_argument("--profile", choices=sorted(PROFILES), default="steady",
+                    help="steady: washout gate on (default); aggressive: gate off")
     a = ap.parse_args()
-    prm = REBOUND
+    prm = PROFILES[a.profile]
     if a.cmd == "download":
         data.download_all(refresh=True)
         bt.build_panel(refresh=True)
