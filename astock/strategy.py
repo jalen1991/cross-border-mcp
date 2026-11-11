@@ -42,7 +42,10 @@ class Params:
     market_filter: bool = False
     # Only trade on days when at least this many stocks fire the entry signal:
     # isolated rebounds carry no edge after costs, market-wide washouts do.
-    min_breadth: int = 10
+    min_breadth: int = 5
+    # ...and when, as of the previous close, at least this share of liquid stocks
+    # sat >= 20% below MA60. Separates real panics from a handful of local crashes.
+    min_washout: float = 0.15
     # "close" buys in the T closing minutes; "next_open" is a stress test that
     # buys at the T+1 open instead (late fill / missed the close).
     entry: str = "close"
@@ -50,9 +53,9 @@ class Params:
     hold_days: int = 3
     stop_loss: float = -0.10          # checked on closes; sold at that close
     take_profit: float = 9.9          # checked on closes; 9.9 = off
-    top_n: int = 10                   # max new buys per day
-    max_positions: int = 10           # account is split into this many equal slots
-    rank_by: str = "pct"              # depth | vol_ratio | pct
+    top_n: int = 20                   # max new buys per day
+    max_positions: int = 20           # account is split into this many equal slots
+    rank_by: str = "pct"              # depth | vol_ratio | pct | random
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -64,7 +67,7 @@ CLASSIC = Params(
     name="classic", dist_ma60_max=9.9, pct_min=3.0, pct_max=5.0, vol_ratio_min=1.3,
     close_pos_min=0.75, turnover_min=3.0, turnover_max=12.0, mcap_min=40e8, amount_min=2e8,
     require_trend=True, market_filter=True, hold_days=1, stop_loss=-9.9, min_breadth=1,
-    top_n=3, max_positions=3,
+    min_washout=0.0, top_n=3, max_positions=3,
 )
 
 
@@ -138,4 +141,8 @@ def score(p: pd.DataFrame, prm: Params) -> pd.Series:
         return p["vol_ratio"]
     if prm.rank_by == "pct":
         return p["pct"]
+    if prm.rank_by == "random":
+        # deterministic scramble of (code, date): a placebo for "does ranking matter"
+        key = p["code"].astype(int) * 7919 + p["date"].dt.dayofyear * 104729
+        return ((key % 2**32) * 2654435761 % 2**32).astype(float)
     return -p["dist_ma60"]

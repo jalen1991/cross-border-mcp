@@ -13,10 +13,19 @@ from . import data
 from .strategy import MAX_HOLD, Params, features, score, signal_mask
 
 PANEL_PATH = os.path.join(data.DATA_DIR, "panel.pkl")
+MARKET_PATH = os.path.join(data.DATA_DIR, "market.csv")
 
 COMMISSION = 0.00025
 SLIPPAGE = 0.0015                       # per side, on top of the quoted price
 STAMP_CUTOVER = pd.Timestamp("2023-08-28")
+
+
+def market_breadth(panel: pd.DataFrame) -> pd.DataFrame:
+    """Daily share of liquid, non-ST stocks trading >= 20% below their MA60.
+    A high share means the sell-off is market-wide rather than a few blow-ups."""
+    u = panel[~panel["is_st"] & (panel["amount"] >= 1e8) & panel["dist_ma60"].notna()]
+    washed = (u["dist_ma60"] <= -0.20).groupby(u["date"]).mean()
+    return pd.DataFrame({"washout": washed, "stocks": u.groupby("date").size()})
 
 
 def build_panel(refresh: bool = False) -> pd.DataFrame:
@@ -48,6 +57,10 @@ def build_panel(refresh: bool = False) -> pd.DataFrame:
     idx["mkt_ok"] = idx["close"] > idx["close"].rolling(20).mean()
     panel = panel.merge(idx[["date", "mkt_ok"]], on="date", how="left")
     panel["mkt_ok"] = panel["mkt_ok"].fillna(False).astype(bool)
+
+    mkt = market_breadth(panel)
+    mkt.to_csv(MARKET_PATH)
+    panel["washout_prev"] = panel["date"].map(mkt["washout"].shift(1)).fillna(0.0)
 
     panel = panel.drop(columns=["amplitude", "chg"])
     for c in panel.select_dtypes("float64").columns:
@@ -102,7 +115,7 @@ def run(panel: pd.DataFrame, prm: Params, start: str | None = None, end: str | N
     p = p[p["n1_close"].notna()]
     cand = p[signal_mask(p, prm)].copy()
     cand["breadth"] = cand.groupby("date")["code"].transform("size")
-    cand = cand[cand["breadth"] >= prm.min_breadth]
+    cand = cand[(cand["breadth"] >= prm.min_breadth) & (cand["washout_prev"] >= prm.min_washout)]
     if prm.entry == "next_open":
         sealed_up = (cand["n1_high"] == cand["n1_low"]) & (cand["n1_pct"] >= cand["limit"] - 0.15)
         cand = cand[~sealed_up & cand["n1_open"].notna()]
