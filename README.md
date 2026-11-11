@@ -69,6 +69,10 @@ Cost Breakdown (CNY):
 ✅ Healthy margin
 ```
 
+## A 股短线策略
+
+`astock/` 是独立的 Python 模块（与 MCP 服务无关）：超跌放量反弹·尾盘确认策略、回测引擎和实盘选股脚本。见 [astock/README.md](astock/README.md)。
+
 ## License
 
 MIT
