@@ -1,5 +1,7 @@
 # 🚢 Cross-Border MCP Server
 
+期货量化工作台在 [`futures-platform`](futures-platform/README.md)：策略回测、参数寻优和模拟风控。`cd futures-platform && npm install && npm run dev`。
+
 > AI-powered cross-border e-commerce toolkit for Australian exports to China.
 
 Your AI agent (Claude Code, Cursor, Codex) becomes a cross-border trade expert.
