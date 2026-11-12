@@ -21,8 +21,9 @@ export const OptimizationHeatmap: React.FC<OptimizationHeatmapProps> = ({
 
   for (const c of result.cells) {
     cellMap.set(`${c.paramX}_${c.paramY}`, c);
-    if (c.sharpeRatio < minSharpe) minSharpe = c.sharpeRatio;
-    if (c.sharpeRatio > maxSharpe) maxSharpe = c.sharpeRatio;
+    if (c.outOfSampleTrades < 2) continue;
+    if (c.outOfSampleSharpe < minSharpe) minSharpe = c.outOfSampleSharpe;
+    if (c.outOfSampleSharpe > maxSharpe) maxSharpe = c.outOfSampleSharpe;
   }
 
   const getCellBg = (sharpe: number) => {
@@ -39,10 +40,10 @@ export const OptimizationHeatmap: React.FC<OptimizationHeatmapProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold text-slate-100">
-            二维参数网格寻优热力图 (目标函数: 夏普比率 Sharpe)
+            二维参数网格寻优热力图 (目标函数: 样本外夏普)
           </h3>
           <p className="text-xs text-slate-400 mt-0.5">
-            点击任意参数网格单元即可一键将该参数组合载入回测引擎验证稳健性（避免孤岛过拟合）
+            前 70% K 线只用来形成信号，颜色和“最优”按后 30% 样本外夏普排序。样本内夏普高、样本外转负的格子标成过拟合。
           </p>
         </div>
 
@@ -52,8 +53,8 @@ export const OptimizationHeatmap: React.FC<OptimizationHeatmapProps> = ({
             onClick={() => onApplyParams(result.bestCell!.paramX, result.bestCell!.paramY)}
             className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition shadow-sm"
           >
-            一键应用最优参数 ({result.paramXKey}={result.bestCell.paramX}, {result.paramYKey}=
-            {result.bestCell.paramY} | Sharpe {result.bestCell.sharpeRatio.toFixed(2)})
+            一键应用样本外最优 ({result.paramXKey}={result.bestCell.paramX}, {result.paramYKey}=
+            {result.bestCell.paramY} | 样本外夏普 {result.bestCell.outOfSampleSharpe.toFixed(2)})
           </button>
         )}
       </div>
@@ -93,6 +94,7 @@ export const OptimizationHeatmap: React.FC<OptimizationHeatmapProps> = ({
                       </td>
                     );
                   }
+                  const traded = cell.outOfSampleTrades >= 2;
                   const isSelected = x === currentX && y === currentY;
                   const isBest =
                     result.bestCell &&
@@ -103,23 +105,30 @@ export const OptimizationHeatmap: React.FC<OptimizationHeatmapProps> = ({
                     <td
                       key={x}
                       onClick={() => onApplyParams(x, y)}
-                      style={{ backgroundColor: getCellBg(cell.sharpeRatio) }}
+                      style={traded ? { backgroundColor: getCellBg(cell.outOfSampleSharpe) } : undefined}
                       className={`p-2 text-center border cursor-pointer transition hover:brightness-125 ${
+                        traded ? "" : "bg-slate-950/70 text-slate-500"
+                      } ${
                         isSelected
                           ? "border-indigo-400 ring-2 ring-indigo-500/60"
                           : "border-slate-800"
                       }`}
                     >
                       <div className="font-bold text-slate-100 flex items-center justify-center gap-1">
-                        <span>{cell.sharpeRatio.toFixed(2)}</span>
+                        <span>{traded ? cell.outOfSampleSharpe.toFixed(2) : "样本不足"}</span>
                         {isBest && (
                           <span className="px-1 py-0.2 text-[9px] rounded bg-amber-500/90 text-slate-950 font-sans font-bold">
                             最优
                           </span>
                         )}
+                        {cell.overfit && (
+                          <span className="px-1 py-0.2 text-[9px] rounded bg-amber-900 text-amber-200 font-sans">
+                            过拟合
+                          </span>
+                        )}
                       </div>
                       <div className="text-[10px] text-slate-300 mt-0.5">
-                        {formatPct(cell.totalReturnPct, 1)} | {cell.totalTrades}笔
+                        外{formatPct(cell.outOfSampleReturnPct, 1)} · 内夏普 {cell.inSampleSharpe.toFixed(1)}
                       </div>
                     </td>
                   );

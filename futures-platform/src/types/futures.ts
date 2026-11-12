@@ -114,6 +114,7 @@ export interface BacktestConfig {
   slippageTicks: number; // 滑点跳数
   stopLossPct: number; // 止损百分比 (0 表示不启用硬止损)
   takeProfitPct: number; // 止盈百分比 (0 表示不启用硬止盈)
+  trailingAtrMult?: number; // ATR 跟踪止损倍数，0 或未设置表示关闭
   barCount: number;
 }
 
@@ -142,6 +143,20 @@ export interface BacktestMetrics {
   avgHoldingBars: number;
 }
 
+export interface SampleWindowMetrics {
+  label: "样本内" | "样本外";
+  startIndex: number;
+  endIndex: number;
+  startEquity: number;
+  endEquity: number;
+  netProfit: number;
+  totalReturnPct: number;
+  maxDrawdownPct: number;
+  sharpeRatio: number;
+  totalTrades: number;
+  winRatePct: number;
+}
+
 export interface BacktestResult {
   config: BacktestConfig;
   contract: FuturesContract;
@@ -152,6 +167,22 @@ export interface BacktestResult {
   equityCurve: EquityPoint[];
   monthlyReturns: { month: string; returnPct: number; profit: number }[];
   metrics: BacktestMetrics;
+  splitIndex: number;
+  inSample: SampleWindowMetrics;
+  outOfSample: SampleWindowMetrics;
+}
+
+export interface StrategyScore {
+  strategyId: StrategyId;
+  name: string;
+  category: string;
+  totalReturnPct: number;
+  sharpeRatio: number;
+  maxDrawdownPct: number;
+  totalTrades: number;
+  outOfSampleSharpe: number;
+  outOfSampleReturnPct: number;
+  outOfSampleTrades: number;
 }
 
 export interface OptimizationCell {
@@ -163,6 +194,11 @@ export interface OptimizationCell {
   winRatePct: number;
   totalTrades: number;
   netProfit: number;
+  inSampleSharpe: number;
+  outOfSampleSharpe: number;
+  outOfSampleReturnPct: number;
+  outOfSampleTrades: number;
+  overfit: boolean;
 }
 
 export interface OptimizationGridResult {

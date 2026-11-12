@@ -15,9 +15,10 @@ import { CandlestickChart } from "./components/CandlestickChart";
 import { EquityDrawdownChart } from "./components/EquityDrawdownChart";
 import { LiveTradingDesk } from "./components/LiveTradingDesk";
 import { OptimizationHeatmap } from "./components/OptimizationHeatmap";
+import { StrategyLeaderboard } from "./components/StrategyLeaderboard";
 import { FUTURES_CONTRACTS, getContractBySymbol, roundToTick } from "./data/contracts";
 import { generateMarketCandles } from "./data/marketGenerator";
-import { calcCommission, calcRequiredMargin, runBacktest, runParameterOptimization } from "./engine/backtester";
+import { calcCommission, calcRequiredMargin, compareStrategies, runBacktest, runParameterOptimization } from "./engine/backtester";
 import {
   computeAccountSummary,
   createInitialSeedPositions,
@@ -61,6 +62,7 @@ export const App: React.FC = () => {
   const [slippageTicks, setSlippageTicks] = useState<number>(1);
   const [stopLossPct, setStopLossPct] = useState<number>(2.5);
   const [takeProfitPct, setTakeProfitPct] = useState<number>(6.0);
+  const [trailingAtrMult, setTrailingAtrMult] = useState<number>(1.5);
   const [barCount, setBarCount] = useState<number>(360);
 
   const handleSelectStrategy = (nextId: StrategyId) => {
@@ -81,6 +83,7 @@ export const App: React.FC = () => {
       slippageTicks,
       stopLossPct,
       takeProfitPct,
+      trailingAtrMult,
       barCount,
     }),
     [
@@ -95,11 +98,13 @@ export const App: React.FC = () => {
       slippageTicks,
       stopLossPct,
       takeProfitPct,
+      trailingAtrMult,
       barCount,
     ]
   );
 
   const backtestResult = useMemo(() => runBacktest(backtestConfig), [backtestConfig]);
+  const strategyScores = useMemo(() => compareStrategies(backtestConfig), [backtestConfig]);
 
   const optimizationResult = useMemo(() => {
     if (activeTab !== "optimizer") return null;
@@ -781,6 +786,24 @@ export const App: React.FC = () => {
                     </div>
                   )}
 
+                  <div>
+                    <div className="flex justify-between mb-1">
+                      <span className="text-slate-400">ATR 跟踪止损</span>
+                      <span className="font-mono text-sky-300">
+                        {trailingAtrMult === 0 ? "关闭" : `${trailingAtrMult.toFixed(1)}×`}
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={4}
+                      step={0.5}
+                      value={trailingAtrMult}
+                      onChange={(e) => setTrailingAtrMult(Number(e.target.value))}
+                      className="w-full accent-indigo-500"
+                    />
+                  </div>
+
                   <div className="grid grid-cols-2 gap-2 pt-1">
                     <div>
                       <div className="flex justify-between mb-1">
@@ -932,6 +955,36 @@ export const App: React.FC = () => {
                 </div>
               </div>
 
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                {[backtestResult.inSample, backtestResult.outOfSample].map((sample) => (
+                  <div key={sample.label} className="bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs text-slate-400">
+                        {sample.label}
+                        <span className="ml-2 font-mono text-slate-500">
+                          K线 {sample.startIndex + 1}–{sample.endIndex + 1}
+                        </span>
+                      </div>
+                      <div className={`text-lg font-bold font-mono mt-1 ${sample.totalReturnPct >= 0 ? "text-rose-400" : "text-emerald-400"}`}>
+                        {formatPct(sample.totalReturnPct)}
+                      </div>
+                    </div>
+                    <div className="flex gap-4 text-xs font-mono text-slate-300">
+                      <span>夏普 <b className="text-indigo-300">{sample.sharpeRatio.toFixed(2)}</b></span>
+                      <span>回撤 <b className="text-amber-400">-{sample.maxDrawdownPct.toFixed(1)}%</b></span>
+                      <span>笔数 <b className="text-slate-100">{sample.totalTrades}</b></span>
+                      <span>胜率 <b className="text-slate-100">{sample.winRatePct.toFixed(0)}%</b></span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <StrategyLeaderboard
+                scores={strategyScores}
+                activeStrategyId={strategyId}
+                onSelect={handleSelectStrategy}
+              />
+
               {/* Interactive K-Line Chart with Strategy Indicators & Signals */}
               <CandlestickChart
                 candles={backtestResult.candles}
@@ -1049,7 +1102,7 @@ export const App: React.FC = () => {
                   策略多维参数鲁棒性寻优 — {activeStrategyDef.name} ({symbol} · {timeframe})
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  自动遍历参数平面组合，定位连续高夏普平原区（Plateau），规避单点过拟合陷阱
+                  参数在前 70% 行情上运行，格子颜色和最优选择看后 30% 样本外夏普，用来避开只在历史样本里有效的参数孤岛。
                 </p>
               </div>
               <button

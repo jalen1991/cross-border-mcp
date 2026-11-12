@@ -10,11 +10,20 @@ import {
   OptimizationCell,
   OptimizationGridResult,
   PositionSide,
+  SampleWindowMetrics,
   SignalEvent,
+  StrategyScore,
   TradeRecord,
 } from "../types/futures";
 import { calcATR } from "./indicators";
-import { evaluateStrategySignals, getStrategyDefinition } from "./strategies";
+import {
+  evaluateStrategySignals,
+  getDefaultParams,
+  getStrategyDefinition,
+  STRATEGY_DEFINITIONS,
+} from "./strategies";
+
+export const SAMPLE_HOLDOUT_RATIO = 0.3;
 
 export function calcCommission(
   contract: FuturesContract,
@@ -90,6 +99,7 @@ export function runBacktest(
   let entryReason = "";
   let entryCommission = 0;
   let entrySlippageCost = 0;
+  let trailExtreme = 0;
 
   const slipAmount = config.slippageTicks * contract.tickSize;
 
@@ -157,6 +167,7 @@ export function runBacktest(
 
     currentSide = null;
     currentLots = 0;
+    trailExtreme = 0;
   };
 
   const openNewPosition = (
@@ -183,6 +194,7 @@ export function runBacktest(
     entryReason = reason || (side === "LONG" ? "策略做多信号" : "策略做空信号");
     entryCommission = comm;
     entrySlippageCost = slipCost;
+    trailExtreme = execPrice;
 
     signals.push({
       index: barIdx,
@@ -206,21 +218,36 @@ export function runBacktest(
     // 1. Check intrabar Stop-Loss / Take-Profit if holding a position from prior bar
     if (currentSide && currentLots > 0 && i > entryIndex) {
       let stoppedOut = false;
+      const protectiveStops: { price: number; reason: string }[] = [];
       if (config.stopLossPct > 0) {
-        const slPrice =
+        protectiveStops.push({
+          price:
+            currentSide === "LONG"
+              ? entryPrice * (1 - config.stopLossPct / 100)
+              : entryPrice * (1 + config.stopLossPct / 100),
+          reason: `触发硬止损 (${config.stopLossPct}%)`,
+        });
+      }
+      const trailMult = config.trailingAtrMult ?? 0;
+      const priorAtr = atrSeries[i - 1];
+      if (trailMult > 0 && priorAtr && priorAtr > 0 && trailExtreme > 0) {
+        protectiveStops.push({
+          price:
+            currentSide === "LONG"
+              ? trailExtreme - priorAtr * trailMult
+              : trailExtreme + priorAtr * trailMult,
+          reason: `触发 ATR 跟踪止损 (${trailMult}×)`,
+        });
+      }
+      if (protectiveStops.length > 0) {
+        const chosen =
           currentSide === "LONG"
-            ? entryPrice * (1 - config.stopLossPct / 100)
-            : entryPrice * (1 + config.stopLossPct / 100);
-        if (
-          (currentSide === "LONG" && bar.low <= slPrice) ||
-          (currentSide === "SHORT" && bar.high >= slPrice)
-        ) {
-          closeCurrentPosition(
-            i,
-            roundToTick(slPrice, contract.tickSize),
-            `触发风控止损 (${config.stopLossPct}%)`,
-            true
-          );
+            ? protectiveStops.reduce((best, next) => (next.price > best.price ? next : best))
+            : protectiveStops.reduce((best, next) => (next.price < best.price ? next : best));
+        const hit =
+          currentSide === "LONG" ? bar.low <= chosen.price : bar.high >= chosen.price;
+        if (hit) {
+          closeCurrentPosition(i, roundToTick(chosen.price, contract.tickSize), chosen.reason, true);
           stoppedOut = true;
         }
       }
@@ -298,6 +325,12 @@ export function runBacktest(
 
     const marginUtil = equity > 0 ? (marginUsed / equity) * 100 : 0;
     if (marginUtil > maxMarginUtilizationPct) maxMarginUtilizationPct = marginUtil;
+
+    if (currentSide === "LONG") {
+      trailExtreme = Math.max(trailExtreme, bar.high);
+    } else if (currentSide === "SHORT") {
+      trailExtreme = trailExtreme === 0 ? bar.low : Math.min(trailExtreme, bar.low);
+    }
 
     equityCurve.push({
       index: i,
@@ -416,6 +449,29 @@ export function runBacktest(
     avgHoldingBars,
   };
 
+  const splitIndex = Math.min(
+    n - 2,
+    Math.max(2, Math.floor(n * (1 - SAMPLE_HOLDOUT_RATIO)))
+  );
+  const inSample = summarizeWindow(
+    "样本内",
+    equityCurve,
+    trades,
+    0,
+    splitIndex - 1,
+    config.initialCapital,
+    barsPerYear
+  );
+  const outOfSample = summarizeWindow(
+    "样本外",
+    equityCurve,
+    trades,
+    splitIndex,
+    n - 1,
+    equityCurve[splitIndex - 1]?.equity ?? config.initialCapital,
+    barsPerYear
+  );
+
   return {
     config,
     contract,
@@ -426,6 +482,60 @@ export function runBacktest(
     equityCurve,
     monthlyReturns,
     metrics,
+    splitIndex,
+    inSample,
+    outOfSample,
+  };
+}
+
+function sharpeOfSeries(equities: number[], barsPerYear: number): number {
+  const returns: number[] = [];
+  for (let i = 1; i < equities.length; i++) {
+    const prev = equities[i - 1];
+    if (prev > 0) returns.push((equities[i] - prev) / prev);
+  }
+  if (returns.length < 2) return 0;
+  const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
+  const variance =
+    returns.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (returns.length - 1);
+  const std = Math.sqrt(variance);
+  const rfPerBar = 0.02 / barsPerYear;
+  return std > 1e-9 ? ((mean - rfPerBar) / std) * Math.sqrt(barsPerYear) : 0;
+}
+
+function summarizeWindow(
+  label: SampleWindowMetrics["label"],
+  equityCurve: EquityPoint[],
+  trades: TradeRecord[],
+  start: number,
+  end: number,
+  startEquity: number,
+  barsPerYear: number
+): SampleWindowMetrics {
+  const slice = equityCurve.slice(start, end + 1);
+  const endEquity = slice[slice.length - 1]?.equity ?? startEquity;
+  const series = [startEquity, ...slice.map((point) => point.equity)];
+  let peak = startEquity;
+  let maxDrawdownPct = 0;
+  for (const equity of series) {
+    if (equity > peak) peak = equity;
+    const drawdown = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
+    if (drawdown > maxDrawdownPct) maxDrawdownPct = drawdown;
+  }
+  const windowTrades = trades.filter((trade) => trade.entryIndex >= start && trade.entryIndex <= end);
+  const wins = windowTrades.filter((trade) => trade.netPnl > 0).length;
+  return {
+    label,
+    startIndex: start,
+    endIndex: end,
+    startEquity,
+    endEquity,
+    netProfit: endEquity - startEquity,
+    totalReturnPct: startEquity > 0 ? ((endEquity - startEquity) / startEquity) * 100 : 0,
+    maxDrawdownPct,
+    sharpeRatio: sharpeOfSeries(series, barsPerYear),
+    totalTrades: windowTrades.length,
+    winRatePct: windowTrades.length > 0 ? (wins / windowTrades.length) * 100 : 0,
   };
 }
 
@@ -479,6 +589,10 @@ export function runParameterOptimization(
         [pY.key]: yVal,
       };
       const res = runBacktest({ ...baseConfig, params: nextParams }, sharedCandles);
+      const overfit =
+        res.inSample.sharpeRatio > 1 &&
+        res.outOfSample.sharpeRatio < 0 &&
+        res.outOfSample.totalTrades > 0;
       const cell: OptimizationCell = {
         paramX: xVal,
         paramY: yVal,
@@ -488,20 +602,27 @@ export function runParameterOptimization(
         winRatePct: res.metrics.winRatePct,
         totalTrades: res.metrics.totalTrades,
         netProfit: res.metrics.netProfit,
+        inSampleSharpe: res.inSample.sharpeRatio,
+        outOfSampleSharpe: res.outOfSample.sharpeRatio,
+        outOfSampleReturnPct: res.outOfSample.totalReturnPct,
+        outOfSampleTrades: res.outOfSample.totalTrades,
+        overfit,
       };
       cells.push(cell);
 
-      if (
-        cell.totalTrades >= 2 &&
-        (!bestCell || cell.sharpeRatio > bestCell.sharpeRatio)
-      ) {
+      const betterOos =
+        !bestCell ||
+        cell.outOfSampleSharpe > bestCell.outOfSampleSharpe ||
+        (cell.outOfSampleSharpe === bestCell.outOfSampleSharpe &&
+          cell.outOfSampleReturnPct > bestCell.outOfSampleReturnPct);
+      if (cell.outOfSampleTrades >= 2 && betterOos) {
         bestCell = cell;
       }
     }
   }
 
   if (!bestCell && cells.length > 0) {
-    bestCell = [...cells].sort((a, b) => b.totalReturnPct - a.totalReturnPct)[0];
+    bestCell = [...cells].sort((a, b) => b.outOfSampleSharpe - a.outOfSampleSharpe)[0];
   }
 
   return {
@@ -514,4 +635,36 @@ export function runParameterOptimization(
     cells,
     bestCell,
   };
+}
+
+export function compareStrategies(baseConfig: BacktestConfig): StrategyScore[] {
+  const contract = getContractBySymbol(baseConfig.symbol);
+  const sharedCandles = generateMarketCandles(contract, baseConfig.timeframe, baseConfig.barCount);
+  return STRATEGY_DEFINITIONS.map((definition) => {
+    const result = runBacktest(
+      {
+        ...baseConfig,
+        strategyId: definition.id,
+        params: getDefaultParams(definition.id),
+      },
+      sharedCandles
+    );
+    return {
+      strategyId: definition.id,
+      name: definition.name,
+      category: definition.category,
+      totalReturnPct: result.metrics.totalReturnPct,
+      sharpeRatio: result.metrics.sharpeRatio,
+      maxDrawdownPct: result.metrics.maxDrawdownPct,
+      totalTrades: result.metrics.totalTrades,
+      outOfSampleSharpe: result.outOfSample.sharpeRatio,
+      outOfSampleReturnPct: result.outOfSample.totalReturnPct,
+      outOfSampleTrades: result.outOfSample.totalTrades,
+    };
+  }).sort((a, b) => {
+    const aTraded = a.outOfSampleTrades >= 2 ? 1 : 0;
+    const bTraded = b.outOfSampleTrades >= 2 ? 1 : 0;
+    if (aTraded !== bTraded) return bTraded - aTraded;
+    return b.outOfSampleSharpe - a.outOfSampleSharpe;
+  });
 }

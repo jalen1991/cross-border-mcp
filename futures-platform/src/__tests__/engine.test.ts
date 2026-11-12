@@ -4,8 +4,10 @@ import { generateMarketCandles } from "../data/marketGenerator";
 import {
   calcCommission,
   calcRequiredMargin,
+  compareStrategies,
   runBacktest,
   runParameterOptimization,
+  SAMPLE_HOLDOUT_RATIO,
 } from "../engine/backtester";
 import { calcATR, calcBollingerBands, calcEMA, calcRSI, calcSMA } from "../engine/indicators";
 import {
@@ -14,7 +16,7 @@ import {
   validateNewOrder,
 } from "../engine/riskSimulator";
 import { getDefaultParams, STRATEGY_DEFINITIONS } from "../engine/strategies";
-import { BacktestConfig, RiskRuleConfig } from "../types/futures";
+import { BacktestConfig, Candle, RiskRuleConfig } from "../types/futures";
 
 describe("Futures Quantitative Engine & Backtester", () => {
   it("generates deterministic OHLCV candles respecting contract tickSize and OHLC invariants", () => {
@@ -167,5 +169,102 @@ describe("Futures Quantitative Engine & Backtester", () => {
     // Reasonable 1-lot order passes
     const validOrder = validateNewOrder("CU2611", "LONG", 1, 76000, summary, rules);
     expect(validOrder.allowed).toBe(true);
+  });
+
+  it("splits every backtest into a 70/30 in-sample and out-of-sample window", () => {
+    const cfg: BacktestConfig = {
+      symbol: "RB2610",
+      timeframe: "1h",
+      strategyId: "dual_ma",
+      params: getDefaultParams("dual_ma"),
+      initialCapital: 1_000_000,
+      positionSizingMode: "FIXED_LOTS",
+      fixedLots: 2,
+      riskPctPerTrade: 2,
+      slippageTicks: 1,
+      stopLossPct: 0,
+      takeProfitPct: 0,
+      barCount: 200,
+    };
+    const result = runBacktest(cfg);
+    expect(result.splitIndex).toBe(Math.floor(200 * (1 - SAMPLE_HOLDOUT_RATIO)));
+    expect(result.inSample.endIndex).toBe(result.splitIndex - 1);
+    expect(result.outOfSample.startIndex).toBe(result.splitIndex);
+    expect(result.inSample.totalTrades + result.outOfSample.totalTrades).toBe(result.metrics.totalTrades);
+    expect(result.outOfSample.endEquity).toBeCloseTo(result.metrics.finalEquity, 4);
+  });
+
+  it("ranks all six strategies on one shared candle path", () => {
+    const cfg: BacktestConfig = {
+      symbol: "AU2612",
+      timeframe: "1h",
+      strategyId: "turtle_donchian",
+      params: getDefaultParams("turtle_donchian"),
+      initialCapital: 1_000_000,
+      positionSizingMode: "FIXED_LOTS",
+      fixedLots: 1,
+      riskPctPerTrade: 2,
+      slippageTicks: 1,
+      stopLossPct: 2,
+      takeProfitPct: 0,
+      trailingAtrMult: 1.5,
+      barCount: 180,
+    };
+    const scores = compareStrategies(cfg);
+    expect(scores).toHaveLength(STRATEGY_DEFINITIONS.length);
+    const traded = (score: (typeof scores)[number]) => (score.outOfSampleTrades >= 2 ? 1 : 0);
+    for (let i = 1; i < scores.length; i++) {
+      const prev = scores[i - 1];
+      const curr = scores[i];
+      if (traded(prev) === traded(curr)) {
+        expect(prev.outOfSampleSharpe).toBeGreaterThanOrEqual(curr.outOfSampleSharpe);
+      } else {
+        expect(traded(prev)).toBeGreaterThan(traded(curr));
+      }
+    }
+  });
+
+  it("closes a long trend with the ATR trailing stop when price reverses", () => {
+    const contract = getContractBySymbol("RB2610");
+    const candles: Candle[] = [];
+    let price = 3600;
+    const start = Date.UTC(2026, 0, 1);
+    for (let i = 0; i < 90; i++) {
+      const ret = i === 85 ? -0.12 : i < 25 ? -0.002 : 0.006;
+      const open = price;
+      const close = roundToTick(price * (1 + ret), contract.tickSize);
+      candles.push({
+        timestamp: start + i * 3600_000,
+        timeStr: `2026-01-${String((i % 28) + 1).padStart(2, "0")} ${String(i % 24).padStart(2, "0")}:00`,
+        open,
+        high: Math.max(open, close),
+        low: Math.min(open, close),
+        close,
+        volume: 10000,
+        openInterest: 80000,
+      });
+      price = close;
+    }
+
+    const result = runBacktest(
+      {
+        symbol: "RB2610",
+        timeframe: "1h",
+        strategyId: "dual_ma",
+        params: { fastPeriod: 4, slowPeriod: 12 },
+        initialCapital: 1_000_000,
+        positionSizingMode: "FIXED_LOTS",
+        fixedLots: 1,
+        riskPctPerTrade: 2,
+        slippageTicks: 0,
+        stopLossPct: 0,
+        takeProfitPct: 0,
+        trailingAtrMult: 1,
+        barCount: candles.length,
+      },
+      candles
+    );
+
+    expect(result.trades.some((trade) => trade.exitReason.includes("ATR 跟踪止损"))).toBe(true);
   });
 });
